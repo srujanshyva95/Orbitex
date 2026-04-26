@@ -42,7 +42,6 @@ import {
   deleteDoc,
   doc,
   getDoc,
-  getDocs,
   increment,
   onSnapshot,
   query,
@@ -720,6 +719,11 @@ function readableFirebaseError(error: unknown) {
   return message;
 }
 
+function logFirestoreError(operation: string, path: string, error: unknown) {
+  console.error(`[Orbitex Firestore] ${operation} failed at ${path}`, error);
+  return readableFirebaseError(error);
+}
+
 let redirectResultPromise: Promise<UserCredential | null> | null = null;
 const userDocumentInitPromises = new Map<string, Promise<void>>();
 
@@ -734,16 +738,21 @@ function ensureUserDocument(firebaseUser: AppUser) {
   const existingPromise = userDocumentInitPromises.get(firebaseUser.uid);
   if (existingPromise) return existingPromise;
 
-  const initPromise = getDoc(userRootDocPath(firebaseUser.uid)).then((snapshot) => {
-    if (snapshot.exists()) return;
+  const userPath = `users/${firebaseUser.uid}`;
+  const initPromise = getDoc(userRootDocPath(firebaseUser.uid))
+    .then((snapshot) => {
+      if (snapshot.exists()) return;
 
-    return setDoc(userRootDocPath(firebaseUser.uid), {
-      uid: firebaseUser.uid,
-      email: firebaseUser.email ?? "",
-      name: firebaseUser.displayName ?? firebaseUser.email ?? "Orbitex user",
-      createdAt: serverTimestamp(),
+      return setDoc(userRootDocPath(firebaseUser.uid), {
+        uid: firebaseUser.uid,
+        email: firebaseUser.email ?? "",
+        name: firebaseUser.displayName ?? firebaseUser.email ?? "Orbitex user",
+        createdAt: serverTimestamp(),
+      });
+    })
+    .catch((error) => {
+      throw new Error(logFirestoreError("ensure user document", userPath, error));
     });
-  });
 
   userDocumentInitPromises.set(firebaseUser.uid, initPromise);
   return initPromise;
@@ -1047,7 +1056,7 @@ export default function OrbitexApp() {
         });
       },
       (error) => {
-        setActionError(error.message);
+        setActionError(logFirestoreError("subscribe tasks", `users/${user.uid}/tasks`, error));
         setDataLoading(false);
       },
     );
@@ -1067,7 +1076,7 @@ export default function OrbitexApp() {
 
         setMeetings(nextMeetings);
       },
-      (error) => setActionError(error.message),
+      (error) => setActionError(logFirestoreError("subscribe meetings", `users/${user.uid}/meetings`, error)),
     );
 
     return unsubscribe;
@@ -1103,15 +1112,15 @@ export default function OrbitexApp() {
                   }),
                 ),
                 setDoc(userDocPath(user.uid, "settings", "routines"), { seeded: true, updatedAt: Date.now() }, { merge: true }),
-              ]).catch((error: Error) => setActionError(error.message));
+              ]).catch((error: Error) => setActionError(logFirestoreError("seed routines", `users/${user.uid}/routines`, error)));
             })
-            .catch((error: Error) => setActionError(error.message));
+            .catch((error: Error) => setActionError(logFirestoreError("read routine settings", `users/${user.uid}/settings/routines`, error)));
           return;
         }
 
         setRoutines(sortRoutines(nextRoutines));
       },
-      (error) => setActionError(error.message),
+      (error) => setActionError(logFirestoreError("subscribe routines", `users/${user.uid}/routines`, error)),
     );
 
     return unsubscribe;
@@ -1130,7 +1139,7 @@ export default function OrbitexApp() {
 
         setGroups(nextGroups);
       },
-      (error) => setActionError(error.message),
+      (error) => setActionError(logFirestoreError("subscribe groups", `groups where members contains ${user.uid}`, error)),
     );
 
     return unsubscribe;
@@ -1163,7 +1172,7 @@ export default function OrbitexApp() {
 
         setGroupTasks(sortGroupTasks(nextGroupTasks));
       },
-      (error) => setActionError(error.message),
+      (error) => setActionError(logFirestoreError("subscribe group tasks", `groups/${selectedGroupId}/tasks`, error)),
     );
 
     return unsubscribe;
@@ -1177,7 +1186,7 @@ export default function OrbitexApp() {
       (snapshot) => {
         setGroupSession(snapshot.exists() ? parseStudySession(snapshot.data()) : null);
       },
-      (error) => setActionError(error.message),
+      (error) => setActionError(logFirestoreError("subscribe group session", `groups/${selectedGroupId}/session/current`, error)),
     );
 
     return unsubscribe;
@@ -1194,14 +1203,14 @@ export default function OrbitexApp() {
         updatedAt: Date.now(),
       },
       { merge: true },
-    ).catch((error: Error) => setActionError(error.message));
+    ).catch((error: Error) => setActionError(logFirestoreError("mark app opened", `users/${user.uid}/dailyStats/${today}`, error)));
 
     const unsubscribe = onSnapshot(
       userDocPath(user.uid, "dailyStats", today),
       (snapshot) => {
         setDailyStats(snapshot.exists() ? parseDailyStats(snapshot.id, snapshot.data()) : defaultDailyStats(today));
       },
-      (error) => setActionError(error.message),
+      (error) => setActionError(logFirestoreError("subscribe daily stats", `users/${user.uid}/dailyStats/${today}`, error)),
     );
 
     return unsubscribe;
@@ -1216,7 +1225,7 @@ export default function OrbitexApp() {
         if (!mounted) return;
         setYesterdayStats(snapshot.exists() ? parseDailyStats(snapshot.id, snapshot.data()) : defaultDailyStats(previousDateKey()));
       })
-      .catch((error: Error) => setActionError(error.message));
+      .catch((error: Error) => setActionError(logFirestoreError("read yesterday stats", `users/${user.uid}/dailyStats/${previousDateKey()}`, error)));
 
     return () => {
       mounted = false;
@@ -1234,7 +1243,7 @@ export default function OrbitexApp() {
         setNoteDirty(false);
         setLastSaved(snapshot.exists() ? "Synced from Firestore" : "Ready to save");
       },
-      (error) => setActionError(error.message),
+      (error) => setActionError(logFirestoreError("subscribe notes", `users/${user.uid}/notes/${noteDocumentId}`, error)),
     );
 
     return unsubscribe;
@@ -1269,7 +1278,7 @@ export default function OrbitexApp() {
           setLastSaved(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
         })
         .catch((error: Error) => {
-          setActionError(error.message);
+          setActionError(logFirestoreError("save note", `users/${currentUser.uid}/notes/${noteDocumentId}`, error));
           setLastSaved("Save failed");
         });
     }, 700);
@@ -1287,9 +1296,9 @@ export default function OrbitexApp() {
     recordedSessionKeysRef.current.add(sessionKey);
     void recordStudySessionRef.current?.(`personal:${personalSession.startedAt}`, personalSession.durationMinutes).catch((error: Error) => {
       recordedSessionKeysRef.current.delete(sessionKey);
-      setActionError(error.message);
+      setActionError(logFirestoreError("record personal study session", `users/${user?.uid ?? "unknown"}/dailyStats/${today}`, error));
     });
-  }, [personalSession, previewMode, ready, timerNow]);
+  }, [personalSession, previewMode, ready, timerNow, user?.uid]);
 
   useEffect(() => {
     if (!ready && !previewMode) return;
@@ -1301,7 +1310,7 @@ export default function OrbitexApp() {
       recordedSessionKeysRef.current.add(sessionKey);
       void recordStudySessionRef.current?.(sessionKey, groupSession.durationMinutes, selectedGroupId, groupSession.participantIds).catch((error: Error) => {
         recordedSessionKeysRef.current.delete(sessionKey);
-        setActionError(error.message);
+        setActionError(logFirestoreError("record group study session", `groups/${selectedGroupId} and users/${user?.uid ?? "unknown"}/dailyStats/${today}`, error));
       });
     }
 
@@ -1313,7 +1322,7 @@ export default function OrbitexApp() {
         void updateDoc(doc(db, "groups", selectedGroupId, "session", "current"), {
           statsRecordedAt: recordedAt,
           updatedAt: recordedAt,
-        }).catch((error: Error) => setActionError(error.message));
+        }).catch((error: Error) => setActionError(logFirestoreError("mark group session recorded", `groups/${selectedGroupId}/session/current`, error)));
       }
     }
   }, [groupSession, selectedGroupId, timerNow, user, previewMode, ready]);
@@ -1983,11 +1992,17 @@ export default function OrbitexApp() {
         createdAt: nextGroup.createdAt,
         updatedAt: now,
       });
+      await setDoc(doc(db, "groupInvites", nextGroup.inviteCode), {
+        groupId: groupRef.id,
+        groupName: nextGroup.name,
+        creatorId: user.uid,
+        createdAt: now,
+      });
 
       setGroupName("");
       setSelectedGroupId(groupRef.id);
     } catch (error) {
-      setActionError(readableFirebaseError(error));
+      setActionError(logFirestoreError("create group", "groups and groupInvites", error));
     }
   }
 
@@ -2038,42 +2053,37 @@ export default function OrbitexApp() {
 
       if (!db) return;
 
-      const matchingGroups = await getDocs(query(collection(db, "groups"), where("inviteCode", "==", normalizedCode)));
-      const targetGroupDocument = matchingGroups.docs[0];
+      const inviteSnapshot = await getDoc(doc(db, "groupInvites", normalizedCode));
 
-      if (!targetGroupDocument) {
+      if (!inviteSnapshot.exists()) {
         setGroupJoinError("Invalid code");
         return;
       }
 
-      const targetGroup = parseGroup(targetGroupDocument.id, targetGroupDocument.data());
-      if (!targetGroup) {
+      const inviteData = inviteSnapshot.data();
+      const targetGroupId = typeof inviteData.groupId === "string" ? inviteData.groupId : "";
+      if (!targetGroupId) {
         setGroupJoinError("Invalid code");
         return;
       }
 
-      if (!targetGroup.members.includes(user.uid)) {
-        await updateDoc(targetGroupDocument.ref, {
-          members: arrayUnion(user.uid),
-          memberProfiles: arrayUnion(userGroupProfile(user, "member")),
-          leaderboard: [
-            ...targetGroup.leaderboard,
-            {
-              id: user.uid,
-              name: displayNameForUser(user),
-              weekKey: weekKey(),
-              focusMinutes: 0,
-              completedGroupTasks: 0,
-            },
-          ],
-          updatedAt: Date.now(),
-        });
-      }
+      await updateDoc(doc(db, "groups", targetGroupId), {
+        members: arrayUnion(user.uid),
+        memberProfiles: arrayUnion(userGroupProfile(user, "member")),
+        leaderboard: arrayUnion({
+          id: user.uid,
+          name: displayNameForUser(user),
+          weekKey: weekKey(),
+          focusMinutes: 0,
+          completedGroupTasks: 0,
+        }),
+        updatedAt: Date.now(),
+      });
 
       setJoinInviteCode("");
-      setSelectedGroupId(targetGroupDocument.id);
+      setSelectedGroupId(targetGroupId);
     } catch (error) {
-      setGroupJoinError(readableFirebaseError(error));
+      setGroupJoinError(logFirestoreError("join group", `groupInvites/${normalizedCode}`, error));
     }
   }
 
@@ -2349,6 +2359,7 @@ export default function OrbitexApp() {
         ...meetings.map((meeting) => deleteDoc(userDocPath(user.uid, "meetings", meeting.id))),
         ...routines.map((routine) => deleteDoc(userDocPath(user.uid, "routines", routine.id))),
         ...groups.filter((group) => group.creatorId === user.uid).map((group) => deleteDoc(doc(database, "groups", group.id))),
+        ...groups.filter((group) => group.creatorId === user.uid).map((group) => deleteDoc(doc(database, "groupInvites", group.inviteCode))),
         deleteDoc(userDocPath(user.uid, "notes", noteDocumentId)),
         deleteDoc(userDocPath(user.uid, "dailyStats", today)),
         deleteDoc(userDocPath(user.uid, "settings", "routines")),
