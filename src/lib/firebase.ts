@@ -12,6 +12,7 @@ const firebaseConfig: FirebaseOptions = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 const recaptchaSiteKey = process.env.NEXT_PUBLIC_RECAPTCHA_SITE_KEY;
+const enableAppCheckOnLocalhost = process.env.NEXT_PUBLIC_ENABLE_APP_CHECK_ON_LOCALHOST === "true";
 
 export const firebaseReady = Boolean(
   firebaseConfig.apiKey &&
@@ -30,7 +31,11 @@ function getOrbitexAppCheck(app: FirebaseApp) {
   const appCheckGlobal = globalThis as typeof globalThis & {
     orbitexAppCheck?: AppCheck;
     orbitexAppCheckWarningShown?: boolean;
+    orbitexAppCheckLocalhostWarningShown?: boolean;
+    orbitexAppCheckErrorWarningShown?: boolean;
   };
+
+  if (appCheckGlobal.orbitexAppCheck) return appCheckGlobal.orbitexAppCheck;
 
   if (!recaptchaSiteKey) {
     if (!appCheckGlobal.orbitexAppCheckWarningShown) {
@@ -40,10 +45,28 @@ function getOrbitexAppCheck(app: FirebaseApp) {
     return null;
   }
 
-  appCheckGlobal.orbitexAppCheck ??= initializeAppCheck(app, {
-    provider: new ReCaptchaV3Provider(recaptchaSiteKey),
-    isTokenAutoRefreshEnabled: true,
-  });
+  const isLocalhost = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+  if (isLocalhost && !enableAppCheckOnLocalhost) {
+    if (!appCheckGlobal.orbitexAppCheckLocalhostWarningShown) {
+      console.warn("Firebase App Check skipped on localhost. Add localhost to reCAPTCHA domains or enable local App Check explicitly.");
+      appCheckGlobal.orbitexAppCheckLocalhostWarningShown = true;
+    }
+    return null;
+  }
+
+  try {
+    appCheckGlobal.orbitexAppCheck = initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider(recaptchaSiteKey),
+      isTokenAutoRefreshEnabled: true,
+    });
+  } catch (error) {
+    if (!appCheckGlobal.orbitexAppCheckErrorWarningShown) {
+      const message = error instanceof Error ? error.message : "Unknown App Check error";
+      console.warn("Firebase App Check initialization failed", message);
+      appCheckGlobal.orbitexAppCheckErrorWarningShown = true;
+    }
+    return null;
+  }
 
   return appCheckGlobal.orbitexAppCheck;
 }

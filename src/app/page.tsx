@@ -46,6 +46,7 @@ import {
   increment,
   onSnapshot,
   query,
+  serverTimestamp,
   setDoc,
   updateDoc,
   where,
@@ -720,6 +721,33 @@ function readableFirebaseError(error: unknown) {
 }
 
 let redirectResultPromise: Promise<UserCredential | null> | null = null;
+const userDocumentInitPromises = new Map<string, Promise<void>>();
+
+function userRootDocPath(userId: string) {
+  if (!db) throw new Error("Firebase is not configured.");
+  return doc(db, "users", userId);
+}
+
+function ensureUserDocument(firebaseUser: AppUser) {
+  if (!db) return Promise.resolve();
+
+  const existingPromise = userDocumentInitPromises.get(firebaseUser.uid);
+  if (existingPromise) return existingPromise;
+
+  const initPromise = getDoc(userRootDocPath(firebaseUser.uid)).then((snapshot) => {
+    if (snapshot.exists()) return;
+
+    return setDoc(userRootDocPath(firebaseUser.uid), {
+      uid: firebaseUser.uid,
+      email: firebaseUser.email ?? "",
+      name: firebaseUser.displayName ?? firebaseUser.email ?? "Orbitex user",
+      createdAt: serverTimestamp(),
+    });
+  });
+
+  userDocumentInitPromises.set(firebaseUser.uid, initPromise);
+  return initPromise;
+}
 
 function withTimeout<T>(promise: Promise<T>, milliseconds: number, fallback: T) {
   return Promise.race([
@@ -770,6 +798,7 @@ export default function OrbitexApp() {
   const [activeView, setActiveView] = useState<View>("Dashboard");
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
+  const [ready, setReady] = useState(false);
   const [dataLoading, setDataLoading] = useState(true);
   const [actionError, setActionError] = useState("");
   const [user, setUser] = useState<AppUser | null>(null);
@@ -852,6 +881,7 @@ export default function OrbitexApp() {
         setYesterdayStats(storedYesterdayStats);
         setNote(storedNote);
         setLastSaved(storedNote ? "Loaded from preview storage" : "Ready to save");
+        setReady(true);
         setAuthLoading(false);
         setDataLoading(false);
       });
@@ -861,6 +891,7 @@ export default function OrbitexApp() {
     if (!auth || !firebaseReady) {
       queueMicrotask(() => {
         console.info("[Orbitex Auth] auth checking skipped: Firebase config missing");
+        setReady(false);
         setAuthLoading(false);
         setDataLoading(false);
       });
@@ -876,8 +907,9 @@ export default function OrbitexApp() {
 
     console.info("[Orbitex Auth] auth checking");
 
-    function commitAuthState(source: string, resolvedUser: FirebaseUser | null) {
+    async function commitAuthState(source: string, resolvedUser: FirebaseUser | null) {
       if (!mounted) return;
+      setReady(false);
       if (noUserTimer) {
         window.clearTimeout(noUserTimer);
         noUserTimer = null;
@@ -889,6 +921,21 @@ export default function OrbitexApp() {
         email: resolvedUser?.email,
       });
 
+      if (resolvedUser) {
+        try {
+          await ensureUserDocument(resolvedUser);
+        } catch (error) {
+          if (!mounted) return;
+          setActionError(readableFirebaseError(error));
+          setUser(null);
+          setReady(false);
+          setAuthLoading(false);
+          setDataLoading(false);
+          return;
+        }
+      }
+
+      if (!mounted) return;
       setUser(resolvedUser);
       setActionError("");
       setActiveView("Dashboard");
@@ -917,6 +964,7 @@ export default function OrbitexApp() {
       setNote("");
       setNoteDirty(false);
       setLastSaved(resolvedUser ? "Loading from Firestore..." : "Not saved yet");
+      setReady(Boolean(resolvedUser));
       setDataLoading(Boolean(resolvedUser));
       setAuthLoading(false);
     }
@@ -925,7 +973,7 @@ export default function OrbitexApp() {
       if (!mounted || !redirectChecked || !authStateChecked) return;
 
       if (latestUser) {
-        commitAuthState(source, latestUser);
+        void commitAuthState(source, latestUser);
         return;
       }
 
@@ -933,7 +981,7 @@ export default function OrbitexApp() {
       console.info("[Orbitex Auth] no user, checking currentUser before showing login", { source });
       noUserTimer = window.setTimeout(() => {
         const settledUser = latestUser ?? currentAuth.currentUser;
-        commitAuthState(`${source} currentUser check`, settledUser);
+        void commitAuthState(`${source} currentUser check`, settledUser);
       }, 600);
     }
 
@@ -977,7 +1025,7 @@ export default function OrbitexApp() {
   }, []);
 
   useEffect(() => {
-    if (previewMode || !db || !user) return;
+    if (previewMode || !ready || !db || !user) return;
 
     const unsubscribe = onSnapshot(
       collection(db, "users", user.uid, "tasks"),
@@ -1005,10 +1053,10 @@ export default function OrbitexApp() {
     );
 
     return unsubscribe;
-  }, [previewMode, user]);
+  }, [previewMode, ready, user]);
 
   useEffect(() => {
-    if (previewMode || !db || !user) return;
+    if (previewMode || !ready || !db || !user) return;
 
     const unsubscribe = onSnapshot(
       collection(db, "users", user.uid, "meetings"),
@@ -1023,10 +1071,10 @@ export default function OrbitexApp() {
     );
 
     return unsubscribe;
-  }, [previewMode, user]);
+  }, [previewMode, ready, user]);
 
   useEffect(() => {
-    if (previewMode || !db || !user) return;
+    if (previewMode || !ready || !db || !user) return;
 
     const unsubscribe = onSnapshot(
       collection(db, "users", user.uid, "routines"),
@@ -1067,10 +1115,10 @@ export default function OrbitexApp() {
     );
 
     return unsubscribe;
-  }, [previewMode, user]);
+  }, [previewMode, ready, user]);
 
   useEffect(() => {
-    if (previewMode || !db || !user) return;
+    if (previewMode || !ready || !db || !user) return;
 
     const unsubscribe = onSnapshot(
       query(collection(db, "groups"), where("members", "array-contains", user.uid)),
@@ -1086,7 +1134,7 @@ export default function OrbitexApp() {
     );
 
     return unsubscribe;
-  }, [previewMode, user]);
+  }, [previewMode, ready, user]);
 
   useEffect(() => {
     if (!selectedGroupId) {
@@ -1104,7 +1152,7 @@ export default function OrbitexApp() {
       return;
     }
 
-    if (!db || !user) return;
+    if (!ready || !db || !user) return;
 
     const unsubscribe = onSnapshot(
       collection(db, "groups", selectedGroupId, "tasks"),
@@ -1119,10 +1167,10 @@ export default function OrbitexApp() {
     );
 
     return unsubscribe;
-  }, [previewMode, selectedGroupId, user]);
+  }, [previewMode, ready, selectedGroupId, user]);
 
   useEffect(() => {
-    if (!selectedGroupId || previewMode || !db || !user) return;
+    if (!selectedGroupId || previewMode || !ready || !db || !user) return;
 
     const unsubscribe = onSnapshot(
       doc(db, "groups", selectedGroupId, "session", "current"),
@@ -1133,10 +1181,10 @@ export default function OrbitexApp() {
     );
 
     return unsubscribe;
-  }, [previewMode, selectedGroupId, user]);
+  }, [previewMode, ready, selectedGroupId, user]);
 
   useEffect(() => {
-    if (previewMode || !db || !user) return;
+    if (previewMode || !ready || !db || !user) return;
 
     void setDoc(
       userDocPath(user.uid, "dailyStats", today),
@@ -1157,10 +1205,10 @@ export default function OrbitexApp() {
     );
 
     return unsubscribe;
-  }, [previewMode, user]);
+  }, [previewMode, ready, user]);
 
   useEffect(() => {
-    if (previewMode || !db || !user) return;
+    if (previewMode || !ready || !db || !user) return;
 
     let mounted = true;
     void getDoc(userDocPath(user.uid, "dailyStats", previousDateKey()))
@@ -1173,10 +1221,10 @@ export default function OrbitexApp() {
     return () => {
       mounted = false;
     };
-  }, [previewMode, user]);
+  }, [previewMode, ready, user]);
 
   useEffect(() => {
-    if (previewMode || !db || !user) return;
+    if (previewMode || !ready || !db || !user) return;
 
     const unsubscribe = onSnapshot(
       doc(db, "users", user.uid, "notes", noteDocumentId),
@@ -1190,7 +1238,7 @@ export default function OrbitexApp() {
     );
 
     return unsubscribe;
-  }, [previewMode, user]);
+  }, [previewMode, ready, user]);
 
   useEffect(() => {
     if (previewMode && noteDirty) {
@@ -1203,7 +1251,7 @@ export default function OrbitexApp() {
       return () => window.clearTimeout(saveTimer);
     }
 
-    if (!db || !user || !noteDirty) return;
+    if (!ready || !db || !user || !noteDirty) return;
 
     const database = db;
     const currentUser = user;
@@ -1227,9 +1275,10 @@ export default function OrbitexApp() {
     }, 700);
 
     return () => window.clearTimeout(saveTimer);
-  }, [note, noteDirty, previewMode, user]);
+  }, [note, noteDirty, previewMode, ready, user]);
 
   useEffect(() => {
+    if (!ready && !previewMode) return;
     if (!personalSession || personalSession.statsRecordedAt || sessionRemainingSeconds(personalSession, timerNow) > 0) return;
 
     const sessionKey = `personal:${personalSession.startedAt}`;
@@ -1240,9 +1289,10 @@ export default function OrbitexApp() {
       recordedSessionKeysRef.current.delete(sessionKey);
       setActionError(error.message);
     });
-  }, [personalSession, timerNow]);
+  }, [personalSession, previewMode, ready, timerNow]);
 
   useEffect(() => {
+    if (!ready && !previewMode) return;
     if (!groupSession || !selectedGroupId || sessionRemainingSeconds(groupSession, timerNow) > 0) return;
 
     const sessionKey = `group:${selectedGroupId}:${groupSession.startedAt}`;
@@ -1266,7 +1316,7 @@ export default function OrbitexApp() {
         }).catch((error: Error) => setActionError(error.message));
       }
     }
-  }, [groupSession, selectedGroupId, timerNow, user, previewMode]);
+  }, [groupSession, selectedGroupId, timerNow, user, previewMode, ready]);
 
   const sortedTasks = useMemo(() => sortTasks(tasks), [tasks]);
   const sortedMeetings = useMemo(() => sortMeetings(meetings), [meetings]);
@@ -1377,7 +1427,7 @@ export default function OrbitexApp() {
       return;
     }
 
-    if (!db || !user) return;
+    if (!ready || !db || !user) return;
 
     await setDoc(
       userDocPath(user.uid, "dailyStats", normalizedStats.date),
@@ -1439,6 +1489,7 @@ export default function OrbitexApp() {
 
   async function recordStudySession(sessionKey: string, durationMinutes: number, groupId?: string, participantIds?: string[]) {
     if (!user || dailyStats.recordedStudySessionIds.includes(sessionKey)) return;
+    if (!previewMode && !ready) return;
 
     if (previewMode) {
       persistPreviewDailyStats({
@@ -1648,6 +1699,7 @@ export default function OrbitexApp() {
   async function signInWithGoogle() {
     if (TEMP_AUTH_BYPASS) {
       setUser(previewUser);
+      setReady(true);
       setAuthLoading(false);
       setDataLoading(false);
       return;
@@ -1664,7 +1716,9 @@ export default function OrbitexApp() {
         uid: result.user.uid,
         email: result.user.email,
       });
+      await ensureUserDocument(result.user);
       setUser(result.user);
+      setReady(true);
       setAuthLoading(false);
       setDataLoading(true);
     } catch (error) {
@@ -2349,6 +2403,14 @@ export default function OrbitexApp() {
           error={actionError}
           onSignIn={signInWithGoogle}
         />
+      </ShellBackground>
+    );
+  }
+
+  if (!ready) {
+    return (
+      <ShellBackground>
+        <LoadingScreen label="Setting up your workspace..." />
       </ShellBackground>
     );
   }
