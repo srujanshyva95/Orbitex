@@ -14,6 +14,8 @@ import {
   LogOut,
   Menu,
   NotebookPen,
+  Pause,
+  Play,
   RotateCcw,
   Search,
   ShieldCheck,
@@ -22,6 +24,7 @@ import {
   Trash2,
   User,
   UsersRound,
+  Volume2,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -56,6 +59,7 @@ import { auth, authPersistenceReady, db, firebaseReady, googleProvider } from "@
 type View = "Dashboard" | "Routine" | "Focus Mode" | "Tasks" | "Meetings" | "Notes" | "Groups" | "Profile";
 type Priority = "High" | "Medium" | "Low";
 type TaskFilter = "All" | "Active" | "Completed";
+type FocusSoundId = "lofi" | "rain" | "white-noise" | "brown-noise" | "binaural-40hz";
 
 type Task = {
   id: string;
@@ -203,6 +207,19 @@ const priorityBadgeClass: Record<Priority, string> = {
   Medium: "bg-purple-400/15 text-purple-200",
   Low: "bg-cyan-400/15 text-cyan-200",
 };
+
+const focusSoundStorageKeys = {
+  selected: "orbitex-focus-sound",
+  volume: "orbitex-focus-sound-volume",
+};
+
+const focusSounds: Array<{ id: FocusSoundId; label: string; description: string; src: string }> = [
+  { id: "lofi", label: "Lo-fi", description: "Soft study loop", src: "/audio/lofi.wav" },
+  { id: "rain", label: "Rain", description: "Gentle rainfall", src: "/audio/rain.wav" },
+  { id: "white-noise", label: "White noise", description: "Bright steady noise", src: "/audio/white-noise.wav" },
+  { id: "brown-noise", label: "Brown noise", description: "Deep steady noise", src: "/audio/brown-noise.wav" },
+  { id: "binaural-40hz", label: "40Hz focus tone", description: "Binaural beat", src: "/audio/binaural-40hz.wav" },
+];
 
 function normalizeDueDate(value: string) {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : today;
@@ -3435,6 +3452,8 @@ function FocusModeView({
         <Stat title="Group" value={selectedGroup?.name ?? "None"} icon={<UsersRound />} />
       </section>
 
+      <FocusSoundCard />
+
       <StudySessionPanel
         title="Personal Focus"
         session={personalSession}
@@ -3473,6 +3492,137 @@ function FocusModeView({
         </Panel>
       )}
     </div>
+  );
+}
+
+function FocusSoundCard() {
+  const [selectedSound, setSelectedSound] = useState<FocusSoundId>(() => {
+    if (typeof window === "undefined") return "lofi";
+
+    const storedSound = window.localStorage.getItem(focusSoundStorageKeys.selected);
+    return focusSounds.some((sound) => sound.id === storedSound) ? (storedSound as FocusSoundId) : "lofi";
+  });
+  const [volume, setVolume] = useState(() => {
+    if (typeof window === "undefined") return 0.45;
+
+    const storedVolume = Number.parseFloat(window.localStorage.getItem(focusSoundStorageKeys.volume) ?? "");
+    return Number.isFinite(storedVolume) ? Math.min(1, Math.max(0, storedVolume)) : 0.45;
+  });
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [audioError, setAudioError] = useState("");
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const activeSound = focusSounds.find((sound) => sound.id === selectedSound) ?? focusSounds[0];
+
+  useEffect(() => {
+    window.localStorage.setItem(focusSoundStorageKeys.selected, selectedSound);
+  }, [selectedSound]);
+
+  useEffect(() => {
+    window.localStorage.setItem(focusSoundStorageKeys.volume, volume.toString());
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
+    }
+  }, [volume]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    audio.pause();
+    audio.load();
+  }, [activeSound.src]);
+
+  function togglePlayback() {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    setAudioError("");
+    audio.volume = volume;
+
+    if (isPlaying) {
+      audio.pause();
+      setIsPlaying(false);
+      return;
+    }
+
+    void audio
+      .play()
+      .then(() => setIsPlaying(true))
+      .catch(() => {
+        setIsPlaying(false);
+        setAudioError("Audio could not start. Try another sound or check browser audio permissions.");
+      });
+  }
+
+  function selectSound(soundId: FocusSoundId) {
+    audioRef.current?.pause();
+    setIsPlaying(false);
+    setAudioError("");
+    setSelectedSound(soundId);
+  }
+
+  return (
+    <Panel title="Focus Sound">
+      <div className="mt-5 grid gap-5 xl:grid-cols-[0.85fr_1.15fr]">
+        <div className="rounded-[1.5rem] border border-white/10 bg-black/20 p-4">
+          <audio ref={audioRef} src={activeSound.src} loop preload="none" />
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-white/35">Now Selected</p>
+              <p className="mt-2 text-2xl font-semibold text-white">{activeSound.label}</p>
+              <p className="mt-1 text-sm text-white/45">{activeSound.description}</p>
+            </div>
+            <button
+              type="button"
+              onClick={togglePlayback}
+              aria-label={isPlaying ? "Pause focus sound" : "Play focus sound"}
+              className="grid h-14 w-14 shrink-0 place-items-center rounded-2xl bg-cyan-300 text-black shadow-[0_0_25px_rgba(103,232,249,0.28)] transition hover:bg-cyan-200"
+            >
+              {isPlaying ? <Pause size={22} /> : <Play size={22} />}
+            </button>
+          </div>
+
+          <label className="mt-6 block">
+            <span className="mb-3 flex items-center justify-between text-sm text-white/60">
+              <span className="flex items-center gap-2">
+                <Volume2 size={17} /> Volume
+              </span>
+              <span>{Math.round(volume * 100)}%</span>
+            </span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.01"
+              value={volume}
+              onChange={(event) => setVolume(Number(event.target.value))}
+              className="h-2 w-full accent-cyan-300"
+            />
+          </label>
+
+          <p className="mt-4 rounded-2xl border border-purple-300/15 bg-purple-300/10 p-3 text-xs leading-5 text-purple-100/80">
+            Use headphones for binaural beats. Effects may vary.
+          </p>
+          {audioError && <p className="mt-3 text-sm text-red-200">{audioError}</p>}
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          {focusSounds.map((sound) => (
+            <button
+              type="button"
+              key={sound.id}
+              onClick={() => selectSound(sound.id)}
+              className={`rounded-2xl border p-4 text-left transition hover:-translate-y-0.5 hover:bg-white/10 ${
+                selectedSound === sound.id ? "border-cyan-300/35 bg-cyan-300/15" : "border-white/10 bg-black/20"
+              }`}
+            >
+              <span className="block font-medium text-white/85">{sound.label}</span>
+              <span className="mt-1 block text-sm text-white/45">{sound.description}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </Panel>
   );
 }
 
